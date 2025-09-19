@@ -1,0 +1,107 @@
+version: '3.8'
+
+# ==============================================
+# n8n with Nginx Alternative Configuration
+# ==============================================
+# This is an alternative to Traefik using Nginx
+# as a reverse proxy with manual SSL configuration
+# ==============================================
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+    networks:
+      - web
+    depends_on:
+      - n8n
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    volumes:
+      - ./ssl:/etc/letsencrypt
+      - ./nginx/webroot:/var/www/certbot
+    command: certonly --webroot --webroot-path=/var/www/certbot --email ${ACME_EMAIL} --agree-tos --no-eff-email -d ${N8N_HOST}
+    profiles: ["ssl-setup"]  # Only run when explicitly called
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    environment:
+      # Basic Configuration
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      
+      # Security
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_TRUST_PROXY=true
+      - N8N_TRUST_HOST=true
+      
+      # Performance
+      - DB_SQLITE_POOL_SIZE=${DB_SQLITE_POOL_SIZE:-5}
+      - N8N_PAYLOAD_SIZE_MAX=${N8N_PAYLOAD_SIZE_MAX:-16}
+      
+      # Features
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED:-true}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+      
+      # Logging
+      - N8N_LOG_LEVEL=${N8N_LOG_LEVEL:-info}
+      - N8N_LOG_OUTPUT=${N8N_LOG_OUTPUT:-console}
+      
+      # Workflow settings
+      - EXECUTIONS_PROCESS=${EXECUTIONS_PROCESS:-main}
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=${EXECUTIONS_DATA_SAVE_ON_ERROR:-all}
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=${EXECUTIONS_DATA_SAVE_ON_SUCCESS:-all}
+      - EXECUTIONS_DATA_MAX_AGE=${EXECUTIONS_DATA_MAX_AGE:-336}
+    
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    networks:
+      - web
+    expose:
+      - "${N8N_PORT}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${N8N_PORT}/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  web:
+    driver: bridge
+
+# ==============================================
+# Setup Instructions for Nginx Alternative
+# ==============================================
+#
+# 1. Create necessary directories:
+#    mkdir -p nginx/conf.d nginx/logs ssl nginx/webroot
+#
+# 2. Create nginx configuration files (see examples below)
+#
+# 3. Generate SSL certificates:
+#    docker compose --profile ssl-setup up certbot
+#
+# 4. Setup certificate renewal:
+#    Add to crontab: 0 3 * * * docker compose run --rm certbot renew && docker compose restart nginx
+#
+# 5. Start services:
+#    docker compose up -d
+#
+# ==============================================
