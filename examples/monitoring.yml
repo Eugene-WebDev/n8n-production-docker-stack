@@ -1,0 +1,451 @@
+version: '3.8'
+
+# ==============================================
+# n8n Monitoring Stack
+# ==============================================
+# Complete monitoring solution with:
+# - Prometheus (metrics collection)
+# - Grafana (visualization)
+# - AlertManager (alerting)
+# - Node Exporter (system metrics)
+# - Cadvisor (container metrics)
+# - Loki (log aggregation)
+# - Promtail (log collection)
+# ==============================================
+
+services:
+  # Main n8n and Traefik services
+  traefik:
+    image: traefik:v2.13.3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      # Metrics endpoint for Prometheus
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0"
+      - "--entrypoints.metrics.address=:8082"
+      - "--metrics.prometheus.entryPoint=metrics"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - web
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${N8N_HOST}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=myresolver"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_TRUST_PROXY=true
+      - N8N_TRUST_HOST=true
+      - DB_SQLITE_POOL_SIZE=${DB_SQLITE_POOL_SIZE:-5}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED:-true}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+      - N8N_LOG_LEVEL=${N8N_LOG_LEVEL:-info}
+      - N8N_LOG_OUTPUT=${N8N_LOG_OUTPUT:-console}
+      # Metrics endpoint
+      - N8N_METRICS=true
+      - N8N_METRICS_PREFIX=n8n_
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    networks:
+      - web
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls.certresolver=myresolver"
+      - "traefik.http.services.n8n.loadbalancer.server.port=${N8N_PORT}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${N8N_PORT}/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.external-url=https://prometheus.${N8N_HOST}'
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.${N8N_HOST}`)"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.routers.prometheus.tls.certresolver=myresolver"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+
+  # Grafana - Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SERVER_ROOT_URL=https://grafana.${N8N_HOST}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${N8N_HOST}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=myresolver"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    depends_on:
+      - prometheus
+
+  # AlertManager - Alerting
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=https://alerts.${N8N_HOST}'
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager
+      - alertmanager_data:/alertmanager
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.alertmanager.rule=Host(`alerts.${N8N_HOST}`)"
+      - "traefik.http.routers.alertmanager.entrypoints=websecure"
+      - "traefik.http.routers.alertmanager.tls.certresolver=myresolver"
+      - "traefik.http.services.alertmanager.loadbalancer.server.port=9093"
+
+  # Node Exporter - System metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - monitoring
+    ports:
+      - "9100:9100"
+
+  # cAdvisor - Container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - monitoring
+    ports:
+      - "8080:8080"
+
+  # Loki - Log aggregation
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki:/etc/loki
+      - loki_data:/loki
+    networks:
+      - monitoring
+    ports:
+      - "3100:3100"
+
+  # Promtail - Log collection
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/promtail:/etc/promtail
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - monitoring
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  # Uptime Kuma - Uptime monitoring
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    container_name: uptime-kuma
+    restart: unless-stopped
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.uptime.rule=Host(`uptime.${N8N_HOST}`)"
+      - "traefik.http.routers.uptime.entrypoints=websecure"
+      - "traefik.http.routers.uptime.tls.certresolver=myresolver"
+      - "traefik.http.services.uptime.loadbalancer.server.port=3001"
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+  loki_data:
+  uptime_kuma_data:
+
+networks:
+  web:
+    external: true
+  monitoring:
+    driver: bridge
+
+# ==============================================
+# Monitoring Stack Setup Instructions
+# ==============================================
+#
+# 1. Create monitoring configuration directories:
+#    mkdir -p monitoring/{prometheus,grafana/{provisioning/{datasources,dashboards},dashboards},alertmanager,loki,promtail}
+#
+# 2. Create configuration files (see configuration examples below)
+#
+# 3. Set Grafana admin password in .env:
+#    GRAFANA_ADMIN_PASSWORD=your-secure-password
+#
+# 4. Start monitoring stack:
+#    docker compose -f docker-compose.yml -f monitoring.yml up -d
+#
+# 5. Access monitoring services:
+#    - Grafana: https://grafana.yourdomain.com
+#    - Prometheus: https://prometheus.yourdomain.com
+#    - AlertManager: https://alerts.yourdomain.com
+#    - Uptime Kuma: https://uptime.yourdomain.com
+#
+# 6. Import Grafana dashboards for n8n, Docker, and system monitoring
+#
+# ==============================================
+# Required Configuration Files
+# ==============================================
+#
+# monitoring/prometheus/prometheus.yml:
+# ```yaml
+# global:
+#   scrape_interval: 15s
+#   evaluation_interval: 15s
+#
+# rule_files:
+#   - "rules/*.yml"
+#
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+#
+# scrape_configs:
+#   - job_name: 'prometheus'
+#     static_configs:
+#       - targets: ['localhost:9090']
+#
+#   - job_name: 'traefik'
+#     static_configs:
+#       - targets: ['traefik:8082']
+#
+#   - job_name: 'n8n'
+#     static_configs:
+#       - targets: ['n8n:5678']
+#     metrics_path: '/metrics'
+#
+#   - job_name: 'node-exporter'
+#     static_configs:
+#       - targets: ['node-exporter:9100']
+#
+#   - job_name: 'cadvisor'
+#     static_configs:
+#       - targets: ['cadvisor:8080']
+# ```
+#
+# monitoring/alertmanager/config.yml:
+# ```yaml
+# global:
+#   smtp_smarthost: 'smtp.gmail.com:587'
+#   smtp_from: 'alerts@yourdomain.com'
+#   smtp_auth_username: 'alerts@yourdomain.com'
+#   smtp_auth_password: 'your-app-password'
+#
+# route:
+#   receiver: 'default'
+#   group_wait: 10s
+#   group_interval: 10s
+#   repeat_interval: 1h
+#
+# receivers:
+#   - name: 'default'
+#     email_configs:
+#       - to: 'admin@yourdomain.com'
+#         subject: 'Alert: {{ .GroupLabels.alertname }}'
+#         body: |
+#           {{ range .Alerts }}
+#           Alert: {{ .Annotations.summary }}
+#           Description: {{ .Annotations.description }}
+#           {{ end }}
+# ```
+#
+# monitoring/grafana/provisioning/datasources/prometheus.yml:
+# ```yaml
+# apiVersion: 1
+# datasources:
+#   - name: Prometheus
+#     type: prometheus
+#     url: http://prometheus:9090
+#     isDefault: true
+#   - name: Loki
+#     type: loki
+#     url: http://loki:3100
+# ```
+#
+# monitoring/loki/local-config.yaml:
+# ```yaml
+# auth_enabled: false
+#
+# server:
+#   http_listen_port: 3100
+#
+# ingester:
+#   lifecycler:
+#     address: 127.0.0.1
+#     ring:
+#       kvstore:
+#         store: inmemory
+#       replication_factor: 1
+#   chunk_idle_period: 5m
+#   chunk_retain_period: 30s
+#
+# schema_config:
+#   configs:
+#     - from: 2020-10-24
+#       store: boltdb
+#       object_store: filesystem
+#       schema: v11
+#       index:
+#         prefix: index_
+#         period: 168h
+#
+# storage_config:
+#   boltdb:
+#     directory: /loki/index
+#   filesystem:
+#     directory: /loki/chunks
+# ```
+#
+# monitoring/promtail/config.yml:
+# ```yaml
+# server:
+#   http_listen_port: 9080
+#   grpc_listen_port: 0
+#
+# positions:
+#   filename: /tmp/positions.yaml
+#
+# clients:
+#   - url: http://loki:3100/loki/api/v1/push
+#
+# scrape_configs:
+#   - job_name: containers
+#     static_configs:
+#       - targets:
+#           - localhost
+#         labels:
+#           job: containerlogs
+#           __path__: /var/lib/docker/containers/*/*log
+#
+#     pipeline_stages:
+#       - json:
+#           expressions:
+#             output: log
+#             stream: stream
+#             attrs:
+#       - json:
+#           expressions:
+#             tag:
+#           source: attrs
+#       - regex:
+#           expression: (?P<container_name>(?:[^|]*))\|(?P<image_name>(?:[^|]*))\|(?P<image_id>(?:[^|]*))\|(?P<container_id>(?:[^|]*))
+#           source: tag
+#       - timestamp:
+#           format: RFC3339Nano
+#           source: time
+#       - labels:
+#           stream:
+#           container_name:
+#           image_name:
+#           image_id:
+#           container_id:
+#       - output:
+#           source: output
+# ```
+#
+# ==============================================
