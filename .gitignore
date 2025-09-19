@@ -1,0 +1,97 @@
+# ==============================================
+# n8n Production Docker Stack - .gitignore
+# ==============================================
+
+# Environment and secrets
+.env
+*.env
+.env.local
+.env.production
+
+# n8n data directory (contains sensitive workflows and credentials)
+n8n_data/
+n8n_data/*
+
+# SSL certificates and keys
+letsencrypt/
+*.pem
+*.key
+*.crt
+*.cert
+
+# Backup files
+backups/
+*.backup
+*.tar.gz
+*.zip
+
+# Logs
+*.log
+logs/
+docker-compose.override.yml
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker volumes
+volumes/
+
+# Test files
+test/
+tests/
+*.test
+
+# Documentation drafts
+*.draft.md
+drafts/
+
+# Personal notes
+notes.txt
+todo.txt
+*.notes
+
+# SSL challenge files
+.well-known/
+
+# Monitoring data (if using monitoring stack)
+prometheus_data/
+grafana_data/
+alertmanager_data/
+
+# Database dumps
+*.sql
+*.dump
+
+# Terraform files (if using IaC)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Ansible files (if using configuration management)
+*.retry
+
+# Keep these files
+!.env.example
+!.gitignore
+!README.md
+!LICENSE
